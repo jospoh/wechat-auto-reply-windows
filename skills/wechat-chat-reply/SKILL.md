@@ -18,6 +18,20 @@ description: 在 Windows 微信 4.x 中读取指定联系人的最新消息、�
 
 详细安装、命令和迁移步骤见 [references/windows.md](references/windows.md)。
 
+## 进程、托盘和窗口状态
+
+不能用 list_apps.isRunning、list_windows 是否返回窗口，或 IsWindowVisible 作为“微信进程未运行”的判断依据。微信收进托盘时，进程和 HWND 可以仍存在，但 visible=false、minimized=false；它与普通最小化不同。
+
+doctor 按 Weixin.exe 及 Weixin.dll 定位主进程，单独输出 running 与 window.state（visible、hidden、minimized、missing、ambiguous）。用真实 UIA 角色 mmui::MainWindow 区分同进程内也叫 Weixin 的辅助窗口；不能恢复任意同名窗口。没有窗口、权限不足、多实例与没有进程分别报错，不混成“未启动”。
+
+- running=true、state=hidden：微信已运行，只是收进托盘。不要重新执行 Weixin.exe；本机实测这会新开登录实例。
+- read、image、transcribe、prepare 通过数据库工作，不恢复、不激活主窗口，保留用户的托盘状态。
+- ui、open、send 需要界面时自动恢复；也可显式执行 restore。托盘隐藏、主窗口识别不明或可见但控件树为空时，通过 Windows UI Automation 查找唯一的微信托盘图标，必要时展开隐藏图标，再双击，让微信自身打开和重绘界面。仅普通最小化使用原生窗口恢复，不重新执行客户端。
+- 托盘查找先通过原生窗口接口定位系统任务栏和通知溢出区域，再仅遍历这些窗口的无障碍树；不要枚举整个桌面的 UIA 子节点，实测会阻塞。不扫描应用正文、不使用 OCR 或固定坐标。图标或展开按钮不唯一、图标缺失时停止；恢复必须回读原进程的真实主窗口角色和非空子控件树，再取得前台焦点。仅灰色空白窗口或 visible=true 不算成功。
+- 主窗口可操作性以无障碍子控件是否可读判断，不以聊天输入框是否存在判断。发送前先检查当前会话；不在目标会话或尚未打开聊天时，使用主窗口搜索框搜索精确联系人，唯一匹配后进入并核实会话，再查找输入框。`send` 内置此步骤；定位会话失败时不会消耗发送单。成功恢复不代表已定位目标聊天，仍须完成会话核实。
+- window.uia_tree_available 与窗口可见性分别判断。恢复后控件树可能仍为空；等待有界时间后失败就明确报告“进程在、窗口已恢复，但聊天控件不可读”，不能声称退出或要求反复启动。微信未登录时由本人完成登录。
+- 用户说“我关了”时先只读核实进程；不要自动恢复窗口或启动微信。如果关的是窗口，说明它仍在托盘；如果真正退出，说明进程不存在。
+
 ## 读消息与理解上下文
 
 运行 read --contact "完整备注或username" --limit 20，读取时间、类型、local_id、shard、sort_seq、sender 和 content。sender=peer 才是对方发来的；self 是本人消息；unknown 不能猜。按真实顺序找出本人最后发言后的对方消息；没有新回复就如实报告。不要把本人最新消息拟成对方消息，也不要只凭左右布局、数字 sender_id 或消息列表顺序判断发送方。

@@ -30,6 +30,7 @@ Codex 本地技能位置：https://learn.chatgpt.com/docs/build-skills
 
     & $python $helper 'doctor'
     & $python $helper 'activate'
+    & $python $helper 'restore'
     & $python $helper 'read' '--contact' '完整备注' '--limit' '20'
     & $python $helper 'open' '--contact' '完整备注'
     & $python $helper 'ui'
@@ -41,7 +42,9 @@ Codex 本地技能位置：https://learn.chatgpt.com/docs/build-skills
     # 全局参数放在子命令之前：
     & $python $helper '--db-dir' 'D:\xwechat_files' '--account' '具体账号目录名' 'read' '--contact' '完整备注'
 
-命令失败时保留 error 原文并说明边界。activate 失败只表明该版本/进程热激活没有通过验证；read 的身份字段来自消息所在分片的 Name2Id，不能拿 UI 名称代替。窗口最小化时先恢复微信到前台；helper 不改变其他应用窗口状态、不重启微信、不操作登录确认。
+命令失败时保留 error 原文并说明边界。activate 失败只表明该版本/进程热激活没有通过验证；read 的身份字段来自消息所在分片的 Name2Id，不能拿 UI 名称代替。微信进程和窗口状态分开检测：托盘隐藏仍报告 running=true、window.state=hidden。数据库读取保持托盘状态。需要界面时，restore 通过唯一的微信托盘图标打开原客户端；找不到可见图标会先展开隐藏图标并重新枚举。无需 OCR，不重新执行客户端。普通最小化仍走原生窗口恢复。
+
+restore 只有在原进程的真实主窗口可见、子控件树非空且取得前台焦点后才成功；输出 method（tray_double_click、native_minimized 或 already_visible）、uia_tree_available=true 和 new_process_started=false。灰色空白窗口不会通过验证。ui、open、send 自动复用此流程；聊天会话和输入框在后续导航中单独核实。托盘图标或展开按钮不唯一、控件树超时为空时停止，不猜坐标、不操作登录确认。当前托盘展开入口已在本机 Windows 通知区域验证，其他 Windows 托盘布局需另行验证。
 
 ## 权限与清理
 

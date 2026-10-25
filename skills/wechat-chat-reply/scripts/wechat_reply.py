@@ -73,36 +73,205 @@ class Backend:
         module=importlib.util.module_from_spec(spec);sys.modules[fullname]=module;spec.loader.exec_module(module)
         setattr(sys.modules['wechatauto'],name,module)
         return module
+    def _window_records(self, pid):
+        # EnumWindows includes hidden top-level windows; visibility is state, not existence.
+        user32=ctypes.WinDLL('user32',use_last_error=True)
+        user32.GetWindowThreadProcessId.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype=wintypes.DWORD
+        user32.GetWindowTextW.argtypes=[wintypes.HWND,wintypes.LPWSTR,ctypes.c_int]
+        user32.GetClassNameW.argtypes=[wintypes.HWND,wintypes.LPWSTR,ctypes.c_int]
+        user32.IsWindowVisible.argtypes=[wintypes.HWND];user32.IsWindowVisible.restype=wintypes.BOOL
+        user32.IsIconic.argtypes=[wintypes.HWND];user32.IsIconic.restype=wintypes.BOOL
+        user32.GetWindow.argtypes=[wintypes.HWND,wintypes.UINT];user32.GetWindow.restype=wintypes.HWND
+        user32.GetWindowLongW.argtypes=[wintypes.HWND,ctypes.c_int];user32.GetWindowLongW.restype=wintypes.LONG
+        records=[]
+        callback_type=ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM)
+        def visit(hwnd, _):
+            owner_pid=wintypes.DWORD();user32.GetWindowThreadProcessId(hwnd,ctypes.byref(owner_pid))
+            if owner_pid.value!=pid:return True
+            title=ctypes.create_unicode_buffer(1024);class_name=ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(hwnd,title,len(title));user32.GetClassNameW(hwnd,class_name,len(class_name))
+            records.append({'hwnd':int(hwnd),'pid':pid,'title':title.value,'class':class_name.value,
+                            'visible':bool(user32.IsWindowVisible(hwnd)),
+                            'minimized':bool(user32.IsIconic(hwnd)),
+                            'owner':int(user32.GetWindow(hwnd,4) or 0),
+                            'style':int(user32.GetWindowLongW(hwnd,-16))&0xffffffff})
+            return True
+        callback=callback_type(visit)
+        user32.EnumWindows.argtypes=[callback_type,wintypes.LPARAM];user32.EnumWindows.restype=wintypes.BOOL
+        if not user32.EnumWindows(callback,0):raise Stop('微信进程存在，但枚举窗口失败。')
+        return records
+    @staticmethod
+    def _window_candidates(records):
+        return [r for r in records if r['owner']==0 and not (r['style']&0x40000000)
+                and (re.fullmatch(r'Qt\d+QWindowIcon',r['class']) or r['class']=='mmui::MainWindow')
+                and any(key in r['title'].lower() for key in ('微信','weixin','wechat'))]
     def discover(self):
         import psutil
-        found=[]
+        found=[];running=[]
         for proc in psutil.process_iter(['pid','name','exe']):
-            if (proc.info.get('name') or '').lower()!='weixin.exe': continue
-            mod=self.acc.AccessibilityGate._weixin_dll_module(proc.pid)
-            if not mod: continue
-            handles=[]
-            callback_type=ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM)
-            def visit(hwnd, _):
-                pid=wintypes.DWORD();ctypes.windll.user32.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
-                if pid.value==proc.pid and ctypes.windll.user32.IsWindowVisible(hwnd):
-                    title=ctypes.create_unicode_buffer(1024);ctypes.windll.user32.GetWindowTextW(hwnd,title,len(title))
-                    if title.value.strip() and ('微信' in title.value or 'Weixin' in title.value or 'WeChat' in title.value):handles.append(int(hwnd))
-                return True
-            callback=callback_type(visit)
-            ctypes.windll.user32.EnumWindows(callback,0)
-            if handles:found.append({'pid':proc.pid,'exe':proc.info['exe'],'dll':mod[2],'version':pathlib.Path(mod[2]).parent.name,'hwnds':handles})
-        if len(found)!=1:raise Stop('需要唯一的已登录微信 4.x 主进程。请启动微信并完成登录；不要同时运行多个实例。')
+            if (proc.info.get('name') or '').lower()!='weixin.exe':continue
+            running.append(proc.pid)
+            try:mod=self.acc.AccessibilityGate._weixin_dll_module(proc.pid)
+            except (OSError,psutil.Error):continue
+            if not mod:continue
+            records=self._window_candidates(self._window_records(proc.pid))
+            # A Weixin.dll-backed main process is running even with no visible window.
+            found.append({'pid':proc.pid,'exe':proc.info['exe'],'dll':mod[2],
+                          'version':pathlib.Path(mod[2]).parent.name,
+                          'hwnds':[r['hwnd'] for r in records]})
+        if not running:raise Stop('微信进程未运行，请先打开微信并由本人完成登录。')
+        if not found:raise Stop('已检测到微信进程，但无法定位或读取 Weixin.dll；请检查版本与同用户权限，不要重复启动微信。')
+        if len(found)!=1:raise Stop('检测到多个微信主进程，请明确使用的实例；未按窗口可见性替你选择。')
         return found[0]
+    def window_status(self):
+        records=self._window_candidates(self._window_records(self.process['pid']))
+        self.process['hwnds']=[r['hwnd'] for r in records]
+        main=[];login=False
+        for record in records:
+            tree_available=None
+            try:
+                control=self.auto.ControlFromHandle(record['hwnd']);role=control.ClassName
+            except Exception:role='unavailable'
+            if role=='mmui::MainWindow':
+                try:tree_available=bool(control.GetChildren())
+                except Exception:tree_available=None
+            record['role']=role;record['uia_tree_available']=tree_available
+            if role=='mmui::MainWindow':main.append(record)
+            if role=='mmui::LoginWindow':login=True
+        # A Qt helper can also be titled Weixin. Prefer the actual UIA main-window role.
+        if len(main)==1:selected=main[0]
+        elif len(main)>1:selected=None
+        else:
+            visible=[r for r in records if r['visible']]
+            selected=records[0] if len(records)==1 else visible[0] if len(visible)==1 else None
+        state='missing' if not records else 'ambiguous'
+        if selected:state='minimized' if selected['minimized'] else 'visible' if selected['visible'] else 'hidden'
+        return {'state':state,'main_hwnd':selected['hwnd'] if selected else None,
+                'logged_in':True if len(main)==1 else False if login else None,
+                'uia_tree_available':selected.get('uia_tree_available') if selected else None,'windows':records}
+    def _restore_window(self, hwnd):
+        user32=ctypes.WinDLL('user32',use_last_error=True)
+        user32.IsWindow.argtypes=[wintypes.HWND];user32.IsWindow.restype=wintypes.BOOL
+        user32.GetWindowThreadProcessId.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.DWORD)]
+        user32.IsWindowVisible.argtypes=[wintypes.HWND];user32.IsWindowVisible.restype=wintypes.BOOL
+        user32.IsIconic.argtypes=[wintypes.HWND];user32.IsIconic.restype=wintypes.BOOL
+        user32.ShowWindowAsync.argtypes=[wintypes.HWND,ctypes.c_int];user32.ShowWindowAsync.restype=wintypes.BOOL
+        user32.SetForegroundWindow.argtypes=[wintypes.HWND];user32.SetForegroundWindow.restype=wintypes.BOOL
+        owner=wintypes.DWORD();user32.GetWindowThreadProcessId(hwnd,ctypes.byref(owner))
+        if not user32.IsWindow(hwnd) or owner.value!=self.process['pid']:
+            raise Stop('微信窗口已变化，未操作旧句柄；请重新检查窗口状态。')
+        user32.ShowWindowAsync(hwnd,9)  # SW_RESTORE works for hidden and minimized windows.
+        deadline=time.monotonic()+3
+        while not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            if time.monotonic()>=deadline:raise Stop('微信进程仍在运行，但主窗口恢复未通过回读验证；未重新启动微信。')
+            time.sleep(.1)
+        user32.GetForegroundWindow.restype=wintypes.HWND
+        user32.AttachThreadInput.argtypes=[wintypes.DWORD,wintypes.DWORD,wintypes.BOOL]
+        user32.BringWindowToTop.argtypes=[wintypes.HWND]
+        kernel32=ctypes.WinDLL('kernel32',use_last_error=True)
+        kernel32.GetCurrentThreadId.restype=wintypes.DWORD
+        current=kernel32.GetCurrentThreadId()
+        foreground=user32.GetForegroundWindow()
+        foreground_thread=user32.GetWindowThreadProcessId(foreground,None)
+        attached=False
+        try:
+            if foreground_thread and foreground_thread!=current:
+                attached=bool(user32.AttachThreadInput(current,foreground_thread,True))
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+        finally:
+            if attached:user32.AttachThreadInput(current,foreground_thread,False)
+        if user32.GetForegroundWindow()!=hwnd:
+            raise Stop('微信未取得前台焦点，未执行键盘操作。')
+        return True
+    def _notification_handles(self):
+        # Native enumeration avoids asking unrelated desktop UIA providers for siblings.
+        user32=ctypes.WinDLL('user32',use_last_error=True)
+        user32.FindWindowExW.argtypes=[wintypes.HWND,wintypes.HWND,wintypes.LPCWSTR,wintypes.LPCWSTR]
+        user32.FindWindowExW.restype=wintypes.HWND
+        user32.IsWindowVisible.argtypes=[wintypes.HWND];user32.IsWindowVisible.restype=wintypes.BOOL
+        handles=[]
+        for cls in ('Shell_TrayWnd','Shell_SecondaryTrayWnd','NotifyIconOverflowWindow','TopLevelWindowForOverflowXamlIsland'):
+            previous=0
+            while True:
+                hwnd=user32.FindWindowExW(None,previous,cls,None)
+                if not hwnd:break
+                if user32.IsWindowVisible(hwnd):handles.append(int(hwnd))
+                previous=hwnd
+        return handles
+    def _tray_controls(self):
+        # Limit discovery to Explorer notification areas, never application content.
+        roots=[self.auto.ControlFromHandle(h) for h in self._notification_handles()]
+        roots=[c for c in roots
+               if c.ClassName in ('Shell_TrayWnd','Shell_SecondaryTrayWnd',
+                                  'NotifyIconOverflowWindow','TopLevelWindowForOverflowXamlIsland')
+               and not c.IsOffscreen]
+        controls=[]
+        for root in roots:
+            controls.extend(self.walk(root,lambda c:True,max_depth=7))
+        return controls
+    def _open_from_tray(self):
+        def icons(controls):
+            return [c for c in controls if c.ControlTypeName=='ButtonControl'
+                    and c.Name in ('微信','Weixin','WeChat') and not c.IsOffscreen]
+        controls=self._tray_controls();matches=icons(controls)
+        if not matches:
+            expand=[c for c in controls if c.ControlTypeName=='ButtonControl'
+                    and c.AutomationId=='1502' and not c.IsOffscreen]
+            if len(expand)!=1:raise Stop('未找到唯一的微信托盘图标或隐藏图标展开按钮；未猜坐标、未重新启动客户端。')
+            expand[0].Click(simulateMove=False)
+            deadline=time.monotonic()+3
+            while True:
+                matches=icons(self._tray_controls())
+                if matches:break
+                if time.monotonic()>=deadline:raise Stop('展开托盘后仍未找到微信图标；未重新启动客户端。')
+                time.sleep(.1)
+        if len(matches)!=1:raise Stop('微信托盘图标不唯一，未选择任何候选。')
+        # Native tray activation invokes WeChat's own show/repaint path.
+        matches[0].DoubleClick(simulateMove=False)
+    def _ready_window(self, status):
+        if status['state']!='visible' or status['main_hwnd'] is None:return False
+        if status.get('logged_in') is False:raise Stop('微信尚未登录，请本人完成登录。')
+        control=self.auto.ControlFromHandle(status['main_hwnd'])
+        return control.ClassName=='mmui::MainWindow' and bool(control.GetChildren())
+    def restore(self):
+        before=self.window_status()
+        if before['state']=='missing':raise Stop('微信进程已运行，但没有可操作窗口；请本人检查登录状态。')
+        if before.get('logged_in') is False:raise Stop('微信尚未登录，请本人完成登录。')
+        if sum(r.get('role')=='mmui::MainWindow' for r in before.get('windows',[]))>1:
+            raise Stop('微信主窗口不唯一，未恢复任何候选。')
+        method='already_visible'
+        if before['state']=='minimized':
+            self._restore_window(before['main_hwnd']);method='native_minimized'
+        elif not self._ready_window(before):
+            self._open_from_tray();method='tray_double_click'
+        deadline=time.monotonic()+5
+        while True:
+            after=self.window_status()
+            if self._ready_window(after):break
+            if time.monotonic()>=deadline:
+                raise Stop('微信窗口恢复未通过验证：需要正常主窗口及可读子控件；未将空白窗口视为成功，未启动新实例。')
+            time.sleep(.1)
+        foreground=self._restore_window(after['main_hwnd'])
+        return {'running':True,'before':before['state'],'after':after['state'],
+                'main_hwnd':after['main_hwnd'],'foreground_requested':foreground,
+                'method':method,'uia_tree_available':True,'new_process_started':False}
     def root(self):
-        roots=[]
-        if all(ctypes.windll.user32.IsIconic(wintypes.HWND(h)) for h in self.process['hwnds']):
-            raise Stop('微信窗口已最小化，请先恢复到前台再读取界面或发送；数据库读取不受影响。')
-        for hwnd in self.process['hwnds']:
-            if ctypes.windll.user32.IsIconic(wintypes.HWND(hwnd)):continue
-            c=self.auto.ControlFromHandle(hwnd)
-            if any(True for _ in self.walk(c, lambda x:x.AutomationId=='chat_input_field', max_depth=25)): roots.append(c)
-        if len(roots)!=1:raise Stop('未找到唯一的已登录聊天窗口；必要时先执行 activate。登录必须由本人完成。')
-        return roots[0]
+        status=self.window_status()
+        if status['state'] in ('hidden','minimized','ambiguous') or (status['state']=='visible' and status.get('uia_tree_available') is False):
+            self.restore();status=self.window_status()
+        if status['main_hwnd'] is None:
+            raise Stop('微信进程已运行，但没有可唯一操作的主窗口；必要时先 activate，登录由本人完成。')
+        deadline=time.monotonic()+3
+        while True:
+            # Restoring the native frame and rebuilding the Qt UIA tree are asynchronous.
+            control=self.auto.ControlFromHandle(status['main_hwnd'])
+            if control.GetChildren():
+                return control
+            if time.monotonic()>=deadline:
+                raise Stop('微信进程已运行，主窗口也已恢复，但无障碍接口未返回主窗口子控件；未当作微信退出，也未新启动实例。请检查无障碍状态或由本人从托盘打开窗口。')
+            time.sleep(.1)
     def walk(self, control, predicate, depth=0, max_depth=25):
         if predicate(control):yield control
         if depth>=max_depth:return
@@ -146,6 +315,7 @@ class Backend:
         root=self.root()
         try:self.input(contact);return {'opened':True,'already_open':True}
         except Stop:pass
+        self._restore_window(self.window_status()['main_hwnd'])
         display=contact.get('remark') or contact.get('nick_name') or contact['username']
         search=self.unique(root,lambda c:c.ClassName=='mmui::XValidatorTextEdit' and c.Name=='搜索','搜索框')
         self.paste(search,display,clear=True)
@@ -153,19 +323,28 @@ class Backend:
         results=list(self.walk(root,lambda c:any(part.startswith('search_item_') for part in c.AutomationId.split('.')) and (c.Name or '').split('\n')[0].strip()==display))
         if len(results)!=1:raise Stop('搜索结果不唯一或不可识别，未打开任何候选。请本人打开目标聊天后重试。')
         item=results[0]
-        invoke=item.GetPattern(self.auto.PatternId.InvokePattern)
-        if invoke:invoke.Invoke()
-        else:
-            select=item.GetPattern(self.auto.PatternId.SelectionItemPattern)
-            if not select:raise Stop('搜索结果缺少可调用操作，请本人打开会话。')
-            select.Select();item.SetFocus();self.auto.SendKeys('{Enter}')
-        time.sleep(.4);self.input(contact)
+        # Qt exposes Invoke/SetFocus on results but they can be no-ops. Activate
+        # the uniquely identified UIA element directly; never press Enter here.
+        item.Click(simulateMove=False)
+        deadline=time.monotonic()+3
+        while True:
+            try:self.input(contact);break
+            except Stop:
+                if time.monotonic()>=deadline:raise
+                time.sleep(.1)
         return {'opened':True,'contact':display}
+    def focus_checked(self, control):
+        if control.SetFocus() is False:raise Stop('无法聚焦目标控件，未执行键盘操作。')
+        focused=self.auto.GetFocusedControl()
+        expected=control.GetRuntimeId()
+        if not expected or tuple(expected)!=tuple(focused.GetRuntimeId()):
+            raise Stop('实际焦点不是目标控件，未执行键盘操作。')
     def paste(self, edit, text, clear=False):
         old=self.auto.GetClipboardText()
         try:
-            if edit.SetFocus() is False:raise Stop('无法聚焦输入控件。')
+            self.focus_checked(edit)
             if clear:self.auto.SendKeys('{Ctrl}a')
+            self.focus_checked(edit)
             self.auto.SetClipboardText(text);self.auto.SendKeys('{Ctrl}v');time.sleep(.25)
         finally:self.auto.SetClipboardText(old)
     def send_approved(self, contact, content):
@@ -235,8 +414,10 @@ def command(options):
     b=Backend()
     if options.command=='doctor':
         data=options.db_dir or b.dbmod.auto_detect_db_dir()
-        return {'python':sys.version.split()[0],'bits':64,'wechat':b.process,'db_dir':data,'accounts':[pathlib.Path(p).name for p in b.dbmod._find_account_dirs(data)] if data else [],'accessible':any(b.acc.AccessibilityGate._mmui_present(h,timeout=.2) for h in b.process['hwnds']),'state_dir':str(STATE)}
+        status=b.window_status()
+        return {'running':True,'python':sys.version.split()[0],'bits':64,'wechat':b.process,'window':status,'db_dir':data,'accounts':[pathlib.Path(p).name for p in b.dbmod._find_account_dirs(data)] if data else [],'accessible':any(b.acc.AccessibilityGate._mmui_present(h,timeout=.2) for h in b.process['hwnds']),'state_dir':str(STATE)}
     if options.command=='activate':return b.activate()
+    if options.command=='restore':return b.restore()
     if options.command=='ui':return b.ui()
     if options.command=='send':return send_ticket(b,options)
     with session(b,options,media=options.command=='transcribe') as db:
@@ -269,6 +450,8 @@ def send_ticket(b,options):
             me,c,rows=context(db,ticket['peer'],30)
             if not rows or message_ref(rows[0])!=ticket['context_ref']:raise Stop('确认后聊天出现变化，请重新查看并确认回复。')
             baseline={(r['shard'],r['local_id']) for r in rows}
+            # Navigate before consuming the ticket; the main window may have no chat open.
+            b.open_chat(c)
             ticket['status']='attempting';save(path,ticket)
             try:b.send_approved(c,ticket['content'])
             except Exception:
@@ -367,7 +550,7 @@ def main():
     p=argparse.ArgumentParser(description='Screenshot-free WeChat 4.x reply helper')
     p.add_argument('--db-dir');p.add_argument('--account')
     sub=p.add_subparsers(dest='command',required=True)
-    for name in ('doctor','activate','ui'):sub.add_parser(name)
+    for name in ('doctor','activate','restore','ui'):sub.add_parser(name)
     for name in ('read','open','prepare','transcribe','image'):
         s=sub.add_parser(name);s.add_argument('--contact',required=True);s.add_argument('--limit',type=int,default=20)
         if name=='prepare':s.add_argument('--content-file',required=True)

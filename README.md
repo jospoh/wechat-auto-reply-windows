@@ -1,6 +1,6 @@
 # 微信聊天回复 Skill
 
-用于 Codex 的 Windows 微信 4.x 技能：读取指定联系人的聊天记录，核实发送方，读取本地图片和语音，并在用户确认具体内容后回复。
+用于 Codex 的 Windows 微信 4.x 技能：读取指定联系人的聊天记录，核实发送方，读取本地图片和语音，并在用户确认具体内容后回复。当前版本：**v1.2.0**，更新内容见 [CHANGELOG.md](CHANGELOG.md)。
 
 **不依赖截图或 OCR。** 账号登录由用户本人完成。消息和附件在本机处理；本地语音识别不上传音频。
 
@@ -12,6 +12,7 @@
 - 生成绑定收件人、正文和聊天上下文的发送单；用户确认后才发送。
 - 发送前校验账号、会话、草稿、输入回读及焦点，发送后查数据库核对；结果不明时禁止自动重发。
 - 自动发现本机微信路径、进程和数据目录；多账号、同名联系人不唯一时停止并消歧。
+- 微信收进托盘时，通过无障碍接口展开隐藏图标并双击唯一的微信图标；打开后校验正常主窗口和可读子控件，再核实聊天会话。无需 OCR，不重新启动客户端。
 
 ## 环境
 
@@ -28,7 +29,7 @@
 
 对 Codex 说：
 
-    $skill-installer install https://github.com/jospoh/wechat-chat-reply/tree/main/skills/wechat-chat-reply
+    $skill-installer install https://github.com/jospoh/wechat-auto-reply-windows/tree/main/skills/wechat-chat-reply
 
 安装后让 Codex 读取技能并初始化环境：
 
@@ -38,7 +39,7 @@
 
 ### 下载 ZIP 或手动安装
 
-从 [Releases](https://github.com/jospoh/wechat-chat-reply/releases) 下载技能 ZIP，解压后在 wechat-chat-reply 文件夹中执行：
+从 [Releases](https://github.com/jospoh/wechat-auto-reply-windows/releases) 下载技能 ZIP，解压后在 wechat-chat-reply 文件夹中执行：
 
     python scripts/install.py
 
@@ -70,9 +71,9 @@
 - 自动触发微信原生“转文字”尚未成功。可读取用户已经触发的微信转写，或改用本地语音识别。
 - 本地 base 模型在短中文语音上出现过错词和重复词；默认 small 模型未在本次验证中评估准确率。低置信度结果不能当作原话。
 - 图片或音频未缓存、密钥不可用时，需要用户在微信打开图片或播放语音后再试，不通过截图交差。
-- 新发送 helper 经过离线保护测试，尚未额外向真实联系人发送测试消息；跨会话搜索和另一台机器也尚未实测。
+- 托盘展开入口已在本机 Windows 通知区域验证；其他 Windows 托盘布局和其他微信版本尚未实测。
 
-详细范围见 [验证记录](skills/wechat-chat-reply/references/validation.md)。目前通过 **18 项离线测试**，并在本机验证环境初始化、消息读取、图片原图读取、界面文字读取和解压安装。
+详细范围见 [验证记录](skills/wechat-chat-reply/references/validation.md)。目前通过 **55 项离线测试**，包含托盘展开、唯一图标、恢复后空树拒绝、会话定位、草稿保护和发送防重。
 
 测试命令（用初始化返回的 Python 路径）：
 
