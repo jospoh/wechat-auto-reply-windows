@@ -1,0 +1,9 @@
+wechat-chat-reply
+Copyright 2026 jospoh
+
+Includes selected modules from fanyuantaier/wechatauto-replica.
+Source: https://github.com/fanyuantaier/wechatauto-replica
+Commit: 5d29e297aee095df65785fc8386af77506554698
+Upstream license: Apache-2.0. Original attribution and license are retained
+in skills/wechat-chat-reply/vendor/NOTICE.txt and vendor/LICENSE.txt.
+Skill instructions and local wrappers are separate original work.

@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+# Preserve the pinned upstream modules byte-for-byte, including their original whitespace.
+skills/wechat-chat-reply/vendor/wechatauto/*.py -whitespace

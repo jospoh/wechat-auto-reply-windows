@@ -1,0 +1,2 @@
+pilk==0.2.4
+faster-whisper==1.2.1

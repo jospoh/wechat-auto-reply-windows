@@ -1,0 +1,5 @@
+Unmodified modules from fanyuantaier/wechatauto-replica.
+Pinned commit: 5d29e297aee095df65785fc8386af77506554698
+License: Apache-2.0 (see LICENSE.txt).
+Only selected modules are loaded; upstream package initialization is not shipped.
+Local wrappers and skill instructions are separate original work.

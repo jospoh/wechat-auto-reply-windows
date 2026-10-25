@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/fanyuantaier/wechatauto-replica",
+  "commit": "5d29e297aee095df65785fc8386af77506554698",
+  "license": "Apache-2.0",
+  "sha256": {
+    "db.py": "1b8958a0e9a3f8d6c2f8fe89acd72c14bb542c3c16635c31b52e05c0f19b247b",
+    "accessibility.py": "045bbf826a1bab8410886090988a3e32afdec403b4beec6b64c0406c47830f38",
+    "media.py": "75f054946e5eecd5de9fa5f191bdb16c3e761b1caf0d04c975a7d52e2b8a9fa9"
+  }
+}
